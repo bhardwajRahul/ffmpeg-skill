@@ -1,5 +1,7 @@
 # Changelog
 
+> `main` moves ahead of the last published npm/GitHub release; a dependent repo should pin a tagged version, not `main`. See README § Development, "Releasing".
+
 ## Unreleased — FFmpeg 8+ / Windows compatibility for caption and color
 
 - **Test: docstring examples can't drift from the parser.** `scenes.py`'s docstring once claimed a ranking option (motion) that was never implemented; that was prose, not an example, so nothing caught it. A new `test_contract.py` test at least closes the more common version of this gap: every `--flag` used in a script's own `Examples:` lines must exist in that script's real argparse parser, checked via the contract's `input_schema`. Verified to catch a deliberately introduced typo before writing this entry. Does not (and cannot) catch a false claim made only in prose.

@@ -26,7 +26,7 @@ import server as mcp_server  # noqa: E402
 
 
 def sh(*cmd, check=True, env=None, cwd=None):
-    proc = subprocess.run([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=cwd)
+    proc = subprocess.run([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env, cwd=cwd)
     if check and proc.returncode != 0:
         raise AssertionError(f"{cmd}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     return proc
@@ -64,7 +64,7 @@ class ContractTests(unittest.TestCase):
         ffmpeg("-ss", "0.7", "-i", cls.src, "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", cls.camb)
         cls.vfr = OUT / "c_vfr.mp4"
         ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30", "-t", "4", "-vf", "select='not(mod(n\\,3))',setpts=N/20/TB",
-               "-vsync", "vfr", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", cls.vfr)
+               "-fps_mode", "vfr", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", cls.vfr)
         cls.hdr = OUT / "c_hdr10.mp4"
         ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30", "-t", "2", "-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
                "-x265-params", "log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc", "-tag:v", "hvc1", cls.hdr)
@@ -115,6 +115,18 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(t["id"], f"ffmpeg-skill/{t['name']}")
             self.assertTrue(re.fullmatch(r"[a-z]+", t["name"]), t["id"])
         self.assertEqual(ids, sorted(ids), "tools are listed in a stable, sorted order")
+
+    def test_provides_covers_every_tool_with_the_dotted_capability_id(self):
+        provides = self.contract["provides"]
+        ids = [p["id"] for p in provides]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids, sorted(ids), "provides is listed in a stable, sorted order")
+        tool_ids = {t["id"] for t in self.contract["tools"]}
+        self.assertEqual({p["tool_id"] for p in provides}, tool_ids, "provides covers exactly the tools this build has")
+        for p in provides:
+            self.assertEqual(p["id"], p["tool_id"].replace("/", ".", 1))
+            self.assertEqual(p["lifecycle"], "EXPERIMENTAL")
+            self.assertEqual(set(p), {"id", "lifecycle", "tool_id"})
 
     def test_every_tool_executable_exists_and_internal_scripts_are_hidden(self):
         for t in self.contract["tools"]:

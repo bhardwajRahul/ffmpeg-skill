@@ -170,6 +170,21 @@ class ContractTests(unittest.TestCase):
                               f"but package.json is {pkg['version']!r} -- update the stale example")
         self.assertGreater(checked, 0, "docs/contract.md: no example block contained skill.version to check")
 
+    def test_docs_failure_json_example_keys_match_the_real_error_shape(self):
+        """docs/contract.md's illustrative failure-JSON example listed only kind/message under
+        error for years after "code"/"retryable" were added to the real die() output (Hardening
+        Phase 2) -- an agent trusting the doc as exhaustive could drop or mishandle fields it
+        didn't know existed. Pin the example's error keys to a real die() JSON document's keys so
+        this class of drift fails CI instead of sitting silently in the docs, mirroring the
+        skill.version check above."""
+        text = (ROOT / "docs" / "contract.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\s*\n(.*?)```", text, re.DOTALL)
+        example = next((json.loads(b) for b in blocks if '"status": "failed"' in b), None)
+        self.assertIsNotNone(example, "docs/contract.md: no example failure-JSON block found to check")
+        doc = self._fails("probe", self.garbage, kind="input")
+        self.assertEqual(set(example["error"].keys()), set(doc["error"].keys()),
+                          "docs/contract.md's failure example error keys are out of sync with the real error shape")
+
     def test_tool_ids_unique_and_canonical(self):
         ids = [t["id"] for t in self.contract["tools"]]
         self.assertEqual(len(ids), len(set(ids)))
@@ -303,6 +318,21 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(self.contract["json_output"]["success"]["status"], "completed")
         self.assertEqual(self.contract["json_output"]["failure"]["status"], "failed")
 
+    def test_dry_run_multistage_pipeline_survives_the_probe_stub(self):
+        """The dry-run stub probe() returns for a not-yet-written output hardcodes a plausible
+        1920x1080/30fps rather than 0x0 -- tried zeroing it (issue #77) to stop it looking like
+        real data in dry-run summary lines, but render.py/join.py chain dry-run probes across
+        pipeline stages and divide by width/height (aspect-ratio math), so a zero placeholder
+        traded a cosmetic issue for a real ZeroDivisionError crash. This pins the crash-free
+        behavior: a join with only --width set (forcing the height-from-aspect division) must
+        not blow up under --dry-run even when its input is itself a dry-run-planned clip that
+        was never actually written."""
+        doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "2", "-o", self.out("dr_a.mp4"), "--dry-run", "--json").stdout)
+        self.assertTrue(doc["dry_run"])
+        proc = tool("join", self.out("dr_a.mp4"), self.out("dr_a.mp4"), "--width", "480",
+                     "-o", self.out("dr_joined.mp4"), "--dry-run", check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_dry_run_metadata(self):
         for t in self.contract["tools"]:
             has_flag = "dry_run" in t["input_schema"]["properties"]
@@ -375,6 +405,33 @@ class ContractTests(unittest.TestCase):
         data = json.loads(doc)
         self.assertIn("-c copy", data["commands"][0])
         self.assertNotIn("-c:v", data["commands"][0])
+
+    def test_color_retag_fallback_keeps_extra_audio_and_subtitles_when_it_can(self):
+        """--retag's "no re-encode" claim only holds for the stream-copy path; when that copy
+        fails (some codec/tag combos can't carry rewritten colour info via -c copy) it used to
+        silently fall back to -map 0:v:0 -map 0:a:0 only, dropping every other audio track,
+        subtitles, chapters and attached pictures with no signal in --json that this happened.
+        Force that fallback (mov_text subtitles copied into MKV, which -c copy can't carry) and
+        confirm the fallback now tries to keep the extra audio track + subtitle stream too, and
+        that --json honestly reports whether a re-encode/drop occurred instead of a bare
+        "completed" that looks identical to the lossless path."""
+        multi = self.work / "retag_multitrack.mp4"
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10", "-f", "lavfi", "-i", f"aevalsrc='{TONE}':s=48000",
+               "-f", "lavfi", "-i", "aevalsrc=0.4*sin(2*PI*220*t):s=48000", "-t", "1.5",
+               "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-preset", "veryfast", "-c:a", "aac", multi)
+        subbed = self.work / "retag_multitrack_sub.mp4"
+        ffmpeg("-i", multi, "-i", self.srt_en, "-map", "0", "-map", "1", "-c", "copy", "-c:s", "mov_text", subbed)
+        out = self.out("retag_fallback.mkv")  # MKV can't carry mov_text via copy -- forces the fallback
+        doc = json.loads(tool("color", subbed, "--retag", "bt709", "-o", out, "--json").stdout)
+        self.assertEqual(doc["status"], "completed")
+        self.assertTrue(doc["reencoded"], "the copy attempt should have failed and triggered a re-encode")
+        import _common
+        r = _common.probe(str(out), role="output")
+        # whichever fallback tier actually succeeded, the JSON must say plainly whether streams
+        # beyond video+selected-audio were dropped -- never silently
+        self.assertIn("dropped_non_av_streams", doc)
+        self.assertEqual(len(r["audio_streams"]) < 2 or r["subtitle_streams"] == 0, doc["dropped_non_av_streams"],
+                          "dropped_non_av_streams must accurately reflect what actually made it into the output")
 
     def test_doctor_reports_this_installed_copys_own_version(self):
         """`doctor`'s `version` is this installed copy's own version (never fetched from the
@@ -762,6 +819,29 @@ class ContractTests(unittest.TestCase):
 
     @unittest.skipIf(platform.system() == "Windows", "the fake ffmpeg is a #!/bin/sh script on a POSIX-only PATH shim; "
                       "not portable to Windows (see the identical rationale on the shim-based tests above).")
+    def test_ffmpeg_failure_after_opening_the_output_leaves_nothing_behind(self):
+        """A bad filter argument or missing input never lets ffmpeg touch the output path at all
+        (test_ffmpeg_failures_are_loud above), but a real mid-encode failure can happen AFTER
+        ffmpeg has already opened/written to the output (a muxer header, a partial frame) --
+        different timing, same die(kind="ffmpeg") outcome. Before the fix this left a stray file
+        behind, since verify_output()'s cleanup only ran on the success path. A fake ffmpeg here
+        writes bytes to the output and THEN exits non-zero, simulating that timing."""
+        shim = self.work / "shim_partial"
+        shim.mkdir(exist_ok=True)
+        (shim / "ffmpeg").write_text("#!/bin/sh\nfor last; do :; done\ncase \"$last\" in -|*null*) exit 1;; esac\n"
+                                      "printf 'partial-mp4-bytes' > \"$last\"\necho 'mid-encode failure' >&2\nexit 1\n")
+        (shim / "ffmpeg").chmod(0o755)
+        env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}")
+        out = self.out("g_partial.mp4")
+        proc = tool("cut", self.src, "--start", "1", "--end", "3", "--accurate", "-o", out, "--json", env=env, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        doc = json.loads(proc.stdout)
+        self.assertEqual(doc["status"], "failed")
+        self.assertEqual(doc["error"]["kind"], "ffmpeg")
+        self.assertFalse(out.exists(), "a partial file ffmpeg wrote before failing must not be left behind")
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffmpeg is a #!/bin/sh script on a POSIX-only PATH shim; "
+                      "not portable to Windows (see the identical rationale on the shim-based tests above).")
     def test_output_verification_failures_are_loud(self):
         """A fake ffmpeg that exits 0 but writes an empty file: every writing tool must still fail."""
         shim = self.work / "shim0"
@@ -835,6 +915,11 @@ class ContractTests(unittest.TestCase):
         doc = self._run_structured("loudness", {"input": str(self.wav), "lufs": -16, "tp": -1.5, "output": str(self.out("loud.m4a"))})
         self.assertEqual(doc["probe"]["audio"]["codec"], "aac")
         self._verify("loudness", doc["output"])
+        # the second-pass (post-normalization) measurement must be in the JSON itself -- an agent
+        # shouldn't need a separate --measure-only call to learn what loudness was actually achieved
+        self.assertIn("result", doc)
+        self.assertAlmostEqual(float(doc["result"]["input_i"]), -16, delta=1.0)
+        self.assertFalse(doc["result"]["silent"])
         doc = self._run_structured("sync", {"reference": str(self.src), "second": str(self.mic)})
         self.assertAlmostEqual(doc["offset_seconds"], 1.5, delta=0.05)
         doc = self._run_structured("sync", {"reference": str(self.src), "second": str(self.mic), "replace_audio": True, "output": str(self.out("synced.mp4"))})

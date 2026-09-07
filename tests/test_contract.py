@@ -85,6 +85,10 @@ class ContractTests(unittest.TestCase):
                "-c:v", "copy", "-c:a", "copy", "-c:s", "srt",
                "-metadata:s:s:0", "language=eng", "-metadata:s:s:0", "title=English",
                "-metadata:s:s:1", "language=jpn", "-metadata:s:s:1", "title=Japanese", cls.subbed)
+        cls.data_stream = OUT / "c_data_stream.mov"
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30", "-f", "lavfi", "-i", f"aevalsrc='{TONE}':s=48000",
+               "-t", "3", "-timecode", "00:00:00:00", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", cls.data_stream)
         cls.garbage = OUT / "c_garbage.mp4"
         cls.garbage.write_bytes(bytes((i * 7919) % 256 for i in range(200_000)))
         cls.empty = OUT / "c_empty.mp4"
@@ -358,6 +362,53 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(meta["video"]["width"], 0)
         self.assertEqual(meta["video"]["height"], 0)
         self.assertEqual(meta["video"]["fps"], 0.0)
+
+    def test_picture_only_edits_keep_the_sources_subtitle_streams(self):
+        """fit.py/color.py/graphics.py/overlay.py used to build an explicit, selective -map
+        list naming only video+audio, silently dropping any subtitle track the source had --
+        found by an ad hoc audit of all 28 tools for stream preservation (#91), not itself
+        checked in. Each now tries run_keeping_subtitles() first (stream-copies subtitle/data
+        alongside the re-encoded picture) before falling back to the original video+audio-only
+        command. c_subbed.mkv (built in setUpClass) has two real SRT subtitle tracks; every tool
+        below must keep BOTH (a partial loss -- e.g. only one surviving -- is still a real
+        regression this asserts against), and --json must report dropped_non_av_streams: false
+        since nothing here should need the fallback."""
+        cases = [
+            ("fit", [self.subbed, "--width", "480", "-o", self.out("keepsub_fit.mkv"), "--json"]),
+            ("color", [self.subbed, "--correct", "--exposure", "0.3", "-o", self.out("keepsub_color.mkv"), "--json"]),
+            ("graphics", [self.subbed, "--template", "lower-third", "--name", "X", "-o", self.out("keepsub_graphics.mkv"), "--json"]),
+            ("overlay", [self.subbed, "--text", "hi", "-o", self.out("keepsub_overlay.mkv"), "--json"]),
+        ]
+        for name, args in cases:
+            doc = json.loads(tool(name, *args).stdout)
+            self.assertFalse(doc["dropped_non_av_streams"], name)
+            kinds = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", doc["output"]).stdout.split()
+            self.assertEqual(kinds.count("subtitle"), 2, f"{name}: expected both source subtitle tracks, got {kinds}")
+
+    def test_overlay_image_keeping_a_short_subtitle_does_not_truncate_the_output(self):
+        """Real regression caught in review of #91's fix, before it shipped: overlay.py's
+        --image branch used -shortest (needed to stop the looped still running forever) alongside
+        -t <duration> (an FFmpeg-7+-precision belt-and-suspenders). Once run_keeping_subtitles()
+        also mapped the source's subtitle track, -shortest's "-stop at whichever mapped stream
+        ends first" semantics meant a subtitle that ends early (c_subbed.mkv's covers only 0-2s
+        of its 6s video) silently truncated the WHOLE output to ~2s -- reproduced directly before
+        the fix (6s in, ~1s out). Fixed by only falling back to -shortest when no duration is
+        known at all; -t alone (exact, bounds only the main input) is used whenever it is."""
+        doc = json.loads(tool("overlay", self.subbed, "--image", self.logo, "-o", self.out("keepsub_overlay_img.mkv"), "--json").stdout)
+        result = doc["probe"]
+        self.assertGreater(result["duration"], 5.0, f"output was truncated to the subtitle's length: {result['duration']}s")
+
+    def test_fit_speed_change_drops_subtitles_instead_of_desyncing_them(self):
+        """A stream-copied subtitle keeps the source's original timestamps; --method speed
+        retimes video (setpts) and audio (atempo) but has no way to retime a copied subtitle
+        track along with them, so keeping it would silently desync captions from the now-faster
+        or -slower picture (caught in review of #91's fix, before it shipped). fit.py must not
+        call run_keeping_subtitles() when it's changing speed -- dropping the subtitle track is
+        the honest outcome, reported via dropped_non_av_streams: true, not a silently-wrong one."""
+        doc = json.loads(tool("fit", self.subbed, "--duration", "2", "-o", self.out("speed_fit.mkv"), "--json").stdout)
+        self.assertTrue(doc["dropped_non_av_streams"])
+        kinds = sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", doc["output"]).stdout
+        self.assertNotIn("subtitle", kinds)
 
     def test_changelog_mentions_every_closed_issue_since_last_tag(self):
         """A merged fix can land after CHANGELOG.md's current-version section was already
@@ -1022,6 +1073,14 @@ class ContractTests(unittest.TestCase):
         doc2 = self._run_structured("probe", {"inputs": [str(self.src)]})
         self.assertEqual(doc2["subtitle_streams"], 0)
         self.assertEqual(doc2["subtitle_stream_details"], [])
+        # data_streams (added alongside run_keeping_subtitles(), #91 review): a plain fixture
+        # with no data/attachment stream reports 0, same additive-field convention as
+        # subtitle_streams above.
+        self.assertEqual(doc2["data_streams"], 0)
+        # positive case: c_data_stream.mov has a real data stream (a -timecode track, the
+        # standard way to get one in mov/mp4) -- confirms detection isn't just "always 0".
+        doc3 = self._run_structured("probe", {"inputs": [str(self.data_stream)]})
+        self.assertEqual(doc3["data_streams"], 1)
 
     def test_color_overlay_caption_export_check_look_render_via_contract(self):
         doc = self._run_structured("color", {"input": str(self.hdr), "to_sdr": True, "fast": True, "output": str(self.out("sdr.mp4"))})

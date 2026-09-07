@@ -24,7 +24,7 @@ import argparse
 import sys
 from typing import List, Optional
 
-from _common import STATE, load_brand, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, x264_args
+from _common import STATE, load_brand, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, x264_args
 
 POS = {
     "top-left": ("{m}", "{m}"),
@@ -193,12 +193,19 @@ def main() -> int:
         # -loop 1 turns the still into a timed stream so fade/enable expressions see real timestamps
         cmd = ffmpeg_base() + ["-i", args.input, "-loop", "1", "-i", args.image]
         fc = f"[1:v]{','.join(chain)},setpts=PTS-STARTPTS[ov];[0:v][ov]{ov}[out]"
-        cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?", "-shortest"]
-        # -shortest alone is not exact on FFmpeg 7+: the muxer keeps up to shortest_buf_duration (10 s)
-        # of the looped still after the video ended, and the file came out 2 s long on 8.1 / 9.0.
-        # The output must be as long as the main input, so say so explicitly.
+        cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?"]
         if meta.get("duration"):
+            # An explicit -t is exact and, unlike -shortest, only bounds the *main* input's
+            # streams -- a preserved subtitle/data stream that ends earlier (run_keeping_subtitles)
+            # must not be allowed to cut the whole output short via -shortest's "stop at whichever
+            # mapped stream finishes first" semantics.
             cmd += ["-t", f"{meta['duration']:.3f}"]
+        else:
+            # No known duration to bound by -t (e.g. probe found no video duration): -shortest is
+            # the only thing stopping the looped still from running forever. FFmpeg 7+'s
+            # shortest_buf_duration slack (up to 10s) is an accepted imprecision here since there is
+            # no better bound available.
+            cmd += ["-shortest"]
     elif args.video:
         pip_meta = probe(args.video)
         if not pip_meta.get("video"):
@@ -219,9 +226,13 @@ def main() -> int:
             ov += f":enable='{enable}'"
         cmd = ffmpeg_base() + ["-i", args.input, "-i", args.video]
         fc = f"[1:v]{','.join(chain)}[ov];[0:v][ov]{ov}[out]"
-        cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?", "-shortest"]
+        cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?"]
         if meta.get("duration"):
+            # See the --image branch above: -t (exact, bounds only the main input) instead of
+            # -shortest (would also stop at a preserved subtitle/data stream that ends earlier).
             cmd += ["-t", f"{meta['duration']:.3f}"]
+        else:
+            cmd += ["-shortest"]
     else:
         x, y = position_exprs(args.position, args.margin, text_mode=True)
         opts = [f"text='{escape_drawtext(args.text)}'", f"fontsize={args.font_size}", f"x={x}", f"y={y}",
@@ -245,12 +256,11 @@ def main() -> int:
 
     cmd += video_args(meta, args.crf, args.preset) + cfr_args(meta)
     cmd += aac_args() if meta.get("audio") else ["-an"]
-    cmd.append(output)
-    run(cmd)
+    dropped_streams = run_keeping_subtitles(cmd, output)
     if not STATE.dry_run:
         result = probe(output, role="output")
         info(f"wrote {output} ({result['duration']:.3f}s)")
-    emit(output)
+    emit(output, dropped_non_av_streams=dropped_streams)
     return 0
 
 

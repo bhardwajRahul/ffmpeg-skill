@@ -37,7 +37,7 @@ import sys
 from fractions import Fraction
 from typing import List
 
-from _common import video_args, STATE, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, ffmpeg_base, info, parse_time, probe, run, x264_args
+from _common import video_args, STATE, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, x264_args
 
 ASPECT_PRESETS = {"16:9": Fraction(16, 9), "9:16": Fraction(9, 16), "1:1": Fraction(1, 1), "4:5": Fraction(4, 5), "4:3": Fraction(4, 3), "21:9": Fraction(21, 9)}
 
@@ -225,15 +225,24 @@ def main() -> int:
         cmd += aac_args()
     else:
         cmd += ["-an"]
-    cmd += post + [output]
-    run(cmd)
+    cmd += post
+    if abs(factor - 1.0) > 1e-4:
+        # A subtitle/data stream stream-copied by run_keeping_subtitles keeps the source's
+        # original timestamps; --method speed retimes video (setpts) and audio (atempo) but has
+        # no equivalent way to retime a copied subtitle track, so it would desync from the
+        # now-faster/slower picture. Drop them here rather than ship a captions track that lies
+        # about when a line is spoken.
+        run(cmd + [output])
+        dropped_streams = bool(meta.get("subtitle_streams") or meta.get("data_streams"))
+    else:
+        dropped_streams = run_keeping_subtitles(cmd, output)
 
     result = probe(output, role="output")
     msg = f"wrote {output} ({result['duration']:.3f}s, {result['video']['width']}x{result['video']['height']})"
     if abs(factor - 1.0) > 1e-4:
         msg += f", speed {factor:.3f}x"
     info(msg)
-    emit(output)
+    emit(output, dropped_non_av_streams=dropped_streams)
     return 0
 
 

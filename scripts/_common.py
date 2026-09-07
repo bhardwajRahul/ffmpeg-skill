@@ -269,6 +269,20 @@ def run(cmd: Sequence[str], *, quiet: bool = False, check: bool = True) -> subpr
     return _run_captured(list(cmd), check)
 
 
+def run_keeping_subtitles(cmd: List[str], output: str) -> bool:
+    """Run an ffmpeg command that already maps its video/audio, trying first to also
+    stream-copy any subtitle/data streams the source has (`-map 0:s?`/`0:d?` are no-ops when
+    there are none). A source whose subtitle codec cannot be copied into the target container
+    (e.g. a container change) makes that first attempt fail; retry the same command without the
+    extra maps rather than let a tool that never touched subtitles start hard-failing because of
+    them. `cmd` is the full argv *without* the output path. Returns True only when the
+    retry-without-subtitles path was actually needed (i.e. subtitle/data streams were dropped)."""
+    if run(cmd + ["-map", "0:s?", "-map", "0:d?", "-c:s", "copy", "-c:d", "copy", output], check=False).returncode == 0:
+        return False
+    run(cmd + [output])
+    return True
+
+
 def _run_captured(cmd: List[str], check: bool) -> subprocess.CompletedProcess:
     """Plain run with stdout/stderr captured."""
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -387,7 +401,7 @@ def probe(path: str, role: str = "input") -> Dict[str, Any]:
             return {"file": path, "dry_run": True, "format": None, "duration": 0.0, "size_bytes": 0, "bitrate": None,
                     "video": {"codec": None, "width": 0, "height": 0, "fps": 0.0, "pix_fmt": None, "hdr": False,
                               "color_transfer": None, "color_primaries": None, "rotation": 0, "variable_frame_rate_suspected": False},
-                    "audio": {"codec": None, "channels": 0, "sample_rate": 0}, "subtitle_streams": 0}
+                    "audio": {"codec": None, "channels": 0, "sample_rate": 0}, "subtitle_streams": 0, "data_streams": 0}
         die(f"input not found: {path}")
     ffprobe = require_tool("ffprobe")
     proc = run(
@@ -405,6 +419,7 @@ def probe(path: str, role: str = "input") -> Dict[str, Any]:
     video = next((s for s in streams if s.get("codec_type") == "video" and s.get("disposition", {}).get("attached_pic", 0) == 0), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     subs = [s for s in streams if s.get("codec_type") == "subtitle"]
+    data_stream_count = sum(1 for s in streams if s.get("codec_type") in ("data", "attachment"))
 
     duration = _to_float(fmt.get("duration"))
     if duration is None and video:
@@ -423,6 +438,7 @@ def probe(path: str, role: str = "input") -> Dict[str, Any]:
         "video": None,
         "audio": None,
         "subtitle_streams": len(subs),
+        "data_streams": data_stream_count,
         # every subtitle stream in file order: index n here is `-map 0:s:n`
         "subtitle_stream_details": [{
             "index": n,

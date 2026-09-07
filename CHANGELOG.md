@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+- **Tests: `overlay.py --image` on an audio-less video is now covered.** Every existing overlay test used a
+  source with audio; investigating a downstream report of `overlay.py` "hanging" on audio-less input (the
+  historical 0.9.x defect this tool's own `-t <duration>` fix, added in 0.10.0, was meant to close) found the
+  fix already works — the run had just been mistaken for a hang under a too-short timeout while it was still
+  transcoding a 1080p60 frame with a fade filter. No code change; `test_overlay_on_audio_less_video_terminates`
+  closes the coverage gap so this defect class can't silently regress.
+
 ## 0.11.0 — 2026-09-07 — Pixel crop, still-to-clip, rotate/flip/PiP/reverse/chromakey/stabilize/sequence/Ken Burns, fail-loudly output verification, capability map
 
 Closes the video-editing-skill ADR-002/ADR-003 gap investigation (11 confirmed gaps): `crop.py`, `insert.py` (incl. Ken Burns), `fit.py --rotate`/`--flip`, `overlay.py --video`/`--chromakey` (video-on-video PiP, chroma key), `reverse.py`, `stabilize.py`, `sequence.py`, `background.py`, `proxy.py`, `contract --json`'s `capability_map`, and a repo-wide "fail loudly" pass making `verify_output()` the single success criterion for every writing tool. 28 tools total (was 21 at 0.10.0); README/package.json's stale "21"/"22" tool-count strings are also corrected to the real count here — see [#50](https://github.com/kajisho5/ffmpeg-skill/issues/50) for making that count self-maintaining going forward.

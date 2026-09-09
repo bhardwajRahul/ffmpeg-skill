@@ -86,6 +86,57 @@ lie entirely inside the source frame (after accounting for display rotation);
 `--width`/`--height` must be even (4:2:0 chroma) and are refused, never
 rounded, if they aren't.
 
+### cropdetect.py — measure black bars, report the crop rectangle
+```
+cropdetect.py INPUT [--seconds N] [--samples N] [--limit F] [--round N]
+```
+Measurement only -- writes no file. Samples `--samples` windows spread
+across the file (default 5, totalling `--seconds` 10s of footage) and
+reports the crop rectangle FFmpeg's `cropdetect` filter found most often, as
+`{x, y, width, height}` ready to hand to `crop.py`. Distinct from
+`fit.py --fit crop`, which crops to a target aspect ratio it computes
+itself with no black-bar measurement involved. A rectangle that matches the
+full source frame means no bars were found. Does not decide whether
+removing detected bars is wanted -- genuine letterboxed content (a
+scope-ratio film in a 16:9 frame) "detects" the same way as accidental
+bars; look at the frame before cropping it away.
+
+### deinterlace.py — deinterlace interlaced footage
+```
+deinterlace.py INPUT [--mode frame|field] [--parity auto|tff|bff] [--only-interlaced] [-o OUT]
+```
+Wraps FFmpeg's `yadif` filter. `--mode frame` (default) keeps the source
+frame rate; `--mode field` emits one frame per field, doubling the output
+frame rate. `--parity` overrides field order when the container gets it
+wrong; `--only-interlaced` skips frames the source doesn't itself mark
+interlaced. Does not detect whether the source needs deinterlacing --
+that's a `look.py` judgement call (visible combing on motion).
+
+### denoise.py — reduce video noise/grain
+```
+denoise.py INPUT [--strength low|medium|high] [--luma-spatial F] [--chroma-spatial F]
+                  [--luma-temporal F] [--chroma-temporal F] [-o OUT]
+```
+Wraps FFmpeg's `hqdn3d` filter. `--strength` picks a tested preset scaling
+all four of hqdn3d's spatial/temporal luma/chroma parameters together; the
+four `--luma-*`/`--chroma-*` flags override any of them individually.
+Heavier denoising trades fine detail for a cleaner but softer image -- for
+audio noise reduction use `audio.py --denoise` instead, this tool only
+touches the picture.
+
+### redact.py — blur or pixelate an exact rectangle
+```
+redact.py INPUT --x X --y Y --width W --height H [--mode blur|pixelate]
+                 [--blur-strength N] [--block-size N] [-o OUT]
+```
+Same rectangle convention as `crop.py` -- the rectangle must already be
+known (a saved detection box, a hand-picked region); this tool does not
+locate faces or plates itself. `--mode blur` (default) box-blurs the
+rectangle; `--mode pixelate` mosaics it into `--block-size`-px blocks, the
+more unmistakably-redacted look often wanted for compliance footage. The
+rest of the frame, and the whole clip's timeline, are untouched -- to
+redact only part of the timeline, `cut.py` the clip into segments first.
+
 ### sphere.py — flat viewport extraction from 360/spherical video
 ```
 sphere.py INPUT [--input-projection equirect|fisheye|dfisheye|c3x2|c6x1|barrel|cylindrical|hequirect]
@@ -104,6 +155,19 @@ distorted or garbled output, not an error. There is no subject detection or
 tracking here: only the typed aim you give it. For a shot that follows a
 moving subject, call this once per keyframe viewpoint from outside this
 tool. `--width`/`--height` must be even (4:2:0 chroma); default 1920x1080.
+
+### straighten.py — rotate by an arbitrary angle (horizon correction)
+```
+straighten.py INPUT --degrees D [--fit crop|pad] [--fill-color C] [-o OUT]
+```
+Distinct from `fit.py --rotate`, which only turns the picture in exact
+90-degree steps -- this wraps FFmpeg's `rotate` filter for a small
+corrective tilt (`--degrees`, -45..45). Rotating by a non-90-degree angle
+leaves triangular gaps at the corners: `--fit crop` (default) scales up
+just enough to fill the frame with no visible gap, losing a thin border of
+the original picture; `--fit pad` keeps the full original picture and fills
+the gaps with `--fill-color`. Does not measure the tilt itself -- give the
+degrees once you can see how far off it is (a `look.py` judgement call).
 
 ### insert.py — still image to a timed silent clip
 ```
@@ -158,6 +222,66 @@ sequence.py --dir DIR --pattern "frame_%04d.png"|"*.png" --fps N
 Turns a numbered or glob-matched set of still images into a video. The match
 is checked on disk before ffmpeg runs (an empty match or a missing first
 frame is refused here, not discovered from an opaque ffmpeg error).
+
+### waveform.py — audio waveform/spectrum visualization video
+```
+waveform.py INPUT [--style waveform|spectrum] [--width W] [--height H] [--fps N]
+                   [--color C] [--background C] [--waveform-mode M] [--split-channels] [-o OUT]
+```
+Renders the input's audio as a video: `--style waveform` (default, FFmpeg's
+`showwaves`) draws amplitude over time; `--style spectrum` (`showspectrum`)
+draws a frequency-over-time heatmap instead, reading more out of dense
+mixes at the cost of being less immediately readable. The output always
+carries the audio it visualizes. For an audio-only input (no video stream
+needed) or any file with an audio track worth visualizing.
+
+### freeze.py — hold a frame for N seconds
+```
+freeze.py INPUT --hold T [--at T] [--mode insert|extend] [-o OUT]
+```
+`--at` (default: the last frame) is the timestamp to freeze; `--hold` is
+how long the freeze lasts. `--mode insert` (default) inserts the hold at
+`--at`, pushing everything after it later by `--hold` seconds. `--mode
+extend` only works with `--at` at (or past) the clip's end and just makes
+the last frame last `--hold` seconds longer, with nothing pushed. Audio is
+silent during the held frame in `--mode insert` (there is no source audio
+for a frozen moment that didn't exist before).
+
+### pad.py — add black/silent padding at the start/end
+```
+pad.py INPUT [--start T] [--end T] [--color C] [-o OUT]
+```
+Distinct from `fit.py --fit pad`, which pads the *frame* (letterbox/
+pillarbox bars around each existing frame) -- this pads the *timeline*:
+extra seconds of solid colour and silence before and/or after the clip's
+existing content. At least one of `--start`/`--end` must be > 0.
+
+### speedramp.py — step through different speeds across a clip
+```
+speedramp.py INPUT --segment START-END:FACTOR [--segment ...] [-o OUT]
+```
+Distinct from `fit.py --duration --method speed`, which applies one
+constant factor to the whole clip -- this takes a list of `--segment`
+pieces (repeatable) covering the clip start to end with no gaps or
+overlaps, each played at its own constant speed (pitch-preserving audio,
+matching `fit.py`), then concatenates them: "speed up, then slow way down
+for the punch, then speed back up," built from a few constant segments
+rather than a continuous curve. `FACTOR` is 0.05..20 (2.0 = twice as fast,
+0.5 = half speed). Picking exactly where a ramp should ease in or out is a
+judgement call for the calling agent, made concrete here as the segment
+boundaries it supplies.
+
+### loop.py — repeat a clip
+```
+loop.py INPUT --times N | --duration T [-o OUT]
+```
+`--times` repeats the whole clip that many times back to back (2 =
+original + 1 repeat). `--duration` instead loops (and trims the last
+repeat) to hit an exact target length. For a background loop, an ambient
+bed, or filling a fixed slot length with a short clip. Does not smooth the
+loop point (no crossfade at the seam) -- a clip that doesn't already loop
+cleanly will show a visible cut/pop at each repeat, which is a property of
+the source material this tool cannot fix.
 
 ### silence.py — remove dead air / jump cuts
 ```

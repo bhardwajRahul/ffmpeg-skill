@@ -6,6 +6,66 @@
 
 (nothing yet)
 
+## 0.15.0 — 5 more tools: straighten, freeze, pad, speedramp, loop
+
+Five more mechanical, typed-flag FFmpeg capabilities:
+
+- `straighten.py` — rotates by an arbitrary angle for horizon correction
+  (`rotate` filter), `--fit crop` (scale to fill, no visible gap) or `--fit
+  pad` (keep the full picture, fill the corners). Distinct from `fit.py
+  --rotate`'s exact 90-degree turns.
+- `freeze.py` — holds a frame for N seconds (`tpad`/`concat`), `--mode
+  insert` (pushes the rest of the clip later) or `--mode extend` (only at
+  the clip's end, no push).
+- `pad.py` — adds black/silent padding at the start and/or end of the
+  timeline (`tpad`/`apad`). Distinct from `fit.py --fit pad`'s per-frame
+  letterbox bars.
+- `speedramp.py` — steps through different constant speeds across a clip
+  via repeatable `--segment START-END:FACTOR` pieces (setpts/atempo per
+  segment, concatenated). Distinct from `fit.py`'s single whole-clip speed
+  factor.
+- `loop.py` — repeats a clip `--times` N or to a target `--duration`
+  (`-stream_loop`).
+
+Same conventions as every other tool here: every numeric flag range-checked
+before ffmpeg runs, no subject detection or judgement (straighten doesn't
+measure the tilt, loop doesn't smooth the seam, freeze doesn't pick where
+to hold -- the calling agent supplies all of that).
+
+Registered in `_contract.py`'s `TOOL_META`/`REENCODE_META` (39 tools total,
+up from 34); 19 new regression tests in `tests/test_all.py`, including a
+pixel-level check that `straighten.py --fit crop` leaves no black corner.
+
+## 0.14.0 — 5 new tools: cropdetect, deinterlace, denoise, redact, waveform
+
+Five mechanical, typed-flag FFmpeg capabilities that had no wrapper yet:
+
+- `cropdetect.py` — measures existing black letterbox/pillarbox bars (FFmpeg's
+  `cropdetect` filter) and reports the `crop.py`-ready rectangle. Analysis only,
+  writes no file. Distinct from `fit.py --fit crop`, which crops to a target
+  aspect ratio it computes itself with no black-bar measurement involved.
+- `deinterlace.py` — deinterlaces old interlaced source footage (`yadif`),
+  `--mode frame` (keeps fps) or `--mode field` (doubles fps), `--parity`.
+- `denoise.py` — video noise/grain reduction (`hqdn3d`), `--strength low/
+  medium/high` or individual spatial/temporal luma/chroma overrides. Distinct
+  from `audio.py --denoise`, which only touches audio.
+- `redact.py` — blurs or pixelates an exact caller-given pixel rectangle for
+  the whole clip (privacy/compliance redaction: faces, plates). Same
+  rectangle convention as `crop.py`; does not locate anything itself.
+- `waveform.py` — renders an audio track as a waveform or spectrum
+  visualization video (`showwaves`/`showspectrum`), for audio-only inputs
+  with no picture worth showing.
+
+All five follow this skill's typed-flags-only convention: every numeric flag
+is range-checked against FFmpeg's own real documented AVOptions before
+ffmpeg runs, and none introduces any subject detection or judgement --
+cropdetect measures existing bars, redact blurs the exact rectangle it's
+given, neither decides what belongs in frame.
+
+Registered in `_contract.py`'s `TOOL_META`/`REENCODE_META` (34 tools total,
+up from 29); 22 new regression tests in `tests/test_all.py` cover the
+functional path and validated ranges for each tool.
+
 ## 0.13.0 — add `sphere.py`: flat-viewport extraction from 360/spherical video
 
 New tool wrapping FFmpeg's `v360` filter for the most common 360-video job: pointing a fixed,

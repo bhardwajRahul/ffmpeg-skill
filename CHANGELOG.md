@@ -6,6 +6,46 @@
 
 (nothing yet)
 
+## 0.16.1 — fix two more escape_drawtext() gaps, and grid.py --pad's audio
+
+Adversarial testing (deliberately hostile filenames -- very long, Unicode,
+shell metacharacters, quotes, semicolons, `%` specifiers, literal filter-
+graph syntax) found two more gaps in `escape_drawtext()`, the shared helper
+every `drawtext=text=...` call site uses (`overlay.py --text`, the
+`--font`/brand-font fallback, and 0.16.0's `grid.py` labels):
+
+- An unescaped `;` split a filterchain exactly like an unescaped `,` does --
+  minimal repro: `overlay.py clip.mp4 --text "a'b;c"` crashed real ffmpeg
+  with `No such filter: 'c...'`. Fixed by adding `;` to the backslash-escape
+  set.
+- The quote character itself had no backslash escape that survives every
+  call shape this codebase uses it in: both the existing `\'`-style escape
+  and a POSIX-shell `'\''` close-insert-reopen escape parse fine in a
+  simple `-vf` chain, but corrupt a `-filter_complex` chain with explicit
+  `[label]` pads (grid.py's shape) -- confirmed by rendering the result:
+  the text value doesn't end where the quote closes it, and trailing
+  option text (`fontfile=...`, `fontsize=...`) leaks into the picture as
+  literal burnt-in text. Fixed by dropping the quote character outright
+  instead of escaping it -- losing one apostrophe from a label is a fair
+  trade for the filter graph parsing correctly everywhere.
+- `%` had the same problem the quote character did: the existing `\%`
+  escape is not a real escape as far as drawtext's own text-expansion
+  scanner (on by default, for `%{pts}`/`%{localtime}`/etc., a separate
+  pass from the graph-level backslash escaping) is concerned -- a bare
+  backslash-escaped `%` always logs "Stray % near ...", which is merely
+  noisy on one ffmpeg build but a hard filtering failure that writes no
+  output at all on another. No caller ever wants `%{...}` expansion, so
+  `%` (and control characters, same underlying cause) are dropped outright
+  instead of chasing a per-build-safe escape.
+
+Also fixed a real bug CodeRabbit's review of 0.16.0 caught before it was
+acted on: `grid.py --pad` held each shorter cell's video on its last frame
+out to the longest clip, but a `--audio-from` track shorter than that was
+mapped straight through with no padding at all -- the release note's "with
+silence" claim wasn't true. Now `--pad` pads the selected audio track with
+`apad`/`atrim` to match, and the docstring/help text describe what `--pad`
+actually does (holds the last frame; does not add black video).
+
 ## 0.16.0 — add grid.py
 
 New tool: composite `--cols`x`--rows` clips into one grid (e.g. a 4x2 wall

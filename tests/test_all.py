@@ -185,6 +185,16 @@ class FFmpegSkillTests(unittest.TestCase):
     def test_cut_bad_range_fails(self):
         script("cut.py", self.src, "--start", "5", "--end", "2", expect_fail=True)
 
+    def test_cut_refuses_negative_start_and_end(self):
+        """Unlike freeze.py/background.py, which explicitly refuse negative durations, cut.py
+        passed --start/--end straight through to parse_time() with no sign check at all, so a
+        negative value (e.g. from an agent computing an offset that went wrong) reached ffmpeg's
+        -ss as -5.000000 instead of being refused with a clear error naming the flag."""
+        proc = script("cut.py", self.src, "--start", "-5", "--end", "2", expect_fail=True)
+        self.assertIn("--start", proc.stderr)
+        proc = script("cut.py", self.src, "--start", "0", "--end", "-2", expect_fail=True)
+        self.assertIn("--end", proc.stderr)
+
     # ---------------------------------------------------------------- fit
     def test_fit_duration_speed_and_aspect_pad(self):
         out = OUT / "fit1.mp4"
@@ -199,6 +209,18 @@ class FFmpegSkillTests(unittest.TestCase):
         m = probe(str(out))
         self.assertClose(m["duration"], 4.0, 0.15)
         self.assertEqual(m["video"]["width"], m["video"]["height"])
+
+    def test_fit_aspect_only_never_upscales_past_source_resolution(self):
+        """With only --aspect given (no --width/--height), the "elif ratio and src_ratio" branch
+        used to bound a narrower/taller target by the source's WIDTH, not its height -- so a
+        1280x720 (16:9) source asked for 9:16 came out 1280x2276, a ~3.16x unrequested upscale in
+        both fit=pad and fit=crop. Neither dimension of the output should exceed the source's."""
+        out = OUT / "fit_aspect_only_tall.mp4"
+        script("fit.py", self.src, "--aspect", "9:16", "--fit", "crop", "--fast", "-o", out)
+        m = probe(str(out))
+        self.assertLessEqual(m["video"]["width"], 1280)
+        self.assertLessEqual(m["video"]["height"], 720)
+        self.assertEqual(m["video"]["height"], 720, "bounded by source height, not blown up")
 
     def test_fit_refuses_extreme_speed(self):
         script("fit.py", self.src, "--duration", "1", expect_fail=True)
@@ -462,6 +484,24 @@ class FFmpegSkillTests(unittest.TestCase):
         m = probe(str(out))
         self.assertClose(m["duration"], 13.5, 0.3)
 
+    def test_freeze_mid_clip_audio_pad_matches_the_frame_rounded_video_hold(self):
+        """The video hold is n = round(hold * fps) whole frames -- n / fps in general isn't
+        exactly --hold when hold*fps isn't an integer (e.g. 1.4s at 30fps -> n=42, 42/30=1.4
+        exactly here, so use a value where it doesn't divide evenly). apad used to pad by the
+        raw --hold value instead of that same frame-rounded duration, so video and audio drifted
+        apart by up to half a frame -- a permanent A/V sync error from that point on. Verify the
+        constructed apad=pad_dur= matches n/fps, not the raw --hold value."""
+        out = OUT / "freeze_avsync.mp4"
+        fps = probe(self.src)["video"]["fps"]
+        hold = 1.03  # picked so hold*fps is not a whole number at this source's fps
+        data = json.loads(script("freeze.py", self.src, "--at", "5", "--hold", str(hold), "-o", out, "--fast", "--json").stdout)
+        n = round(hold * fps)
+        expected_pad = n / fps
+        cmd = data["commands"][0]
+        m = re.search(r"apad=pad_dur=([\d.]+)", cmd)
+        self.assertIsNotNone(m, f"expected an apad=pad_dur= in: {cmd}")
+        self.assertAlmostEqual(float(m.group(1)), expected_pad, places=4)
+
     def test_freeze_extend_mode_before_end_refused(self):
         script("freeze.py", self.src, "--at", "2", "--hold", "1", "--mode", "extend", expect_fail=True)
 
@@ -655,6 +695,28 @@ class FFmpegSkillTests(unittest.TestCase):
         right = px(out, 620, 180)
         self.assertGreater(left[0], right[0], "left edge should be redder than the right edge")
         self.assertGreater(right[2], left[2], "right edge should be bluer than the left edge")
+
+    def test_background_gradient_pins_speed_and_seed_for_a_static_reproducible_clip(self):
+        """The `gradients` source filter defaults to speed=0.01 (a slow rotation applied every
+        frame) and seed=-1 (a fresh random seed every run) -- so this "static" background (per
+        its own docstring: "a title card background, a placeholder behind a logo") silently
+        drifted frame to frame instead of staying put, and was not reproducible between runs,
+        breaking the bit_exact/deterministic contract _contract.py declares for background.py.
+        Confirmed live: the same pixel changed value between t=0s and t=1s of a 3s clip before
+        pinning speed near its filter-enforced floor (1e-05; 0 itself is refused). Check the
+        constructed filter string directly rather than sampled pixels, since a pixel-value
+        comparison is sensitive to x264 encoder rounding that differs between platforms/builds
+        independently of whether speed/seed are actually pinned."""
+        out = OUT / "bg_grad_pin.mp4"
+        data = json.loads(script("background.py", "-o", out, "--duration", "3", "--width", "320", "--height", "240",
+                                  "--gradient", "0x000000:0xffffff", "--angle", "37", "--fast", "--json").stdout)
+        cmd = data["commands"][0]
+        self.assertIn("gradients=", cmd)
+        self.assertRegex(cmd, r"seed=\d+", "seed must be pinned to a fixed value, not left at the -1 (random) default")
+        self.assertNotIn("speed=0.01", cmd, "speed must not be left at its default 0.01 (a visible per-frame rotation)")
+        m = re.search(r"speed=([\d.e-]+)", cmd)
+        self.assertIsNotNone(m, f"expected an explicit speed= in: {cmd}")
+        self.assertLess(float(m.group(1)), 0.001, "speed must be pinned near-zero, not left animating")
 
     def test_background_odd_dimensions_refused(self):
         script("background.py", "-o", OUT / "bg_bad.mp4", "--duration", "1", "--width", "641", "--height", "360", expect_fail=True)
@@ -1858,6 +1920,21 @@ class FFmpegSkillTests(unittest.TestCase):
         self.assertEqual(cues[0][2], "a\nb", "text after the fake blank-line boundary must not be silently dropped")
         self.assertEqual(cues[1][2], "second cue", "the second cue must still have its own timecode/index, not be swallowed as stray text")
 
+    def test_caption_malformed_timestamp_falls_back_to_just_the_text_not_the_whole_line(self):
+        """TIME_RE can match a line (finding a text portion after the arrow) even when one of the
+        two timestamps inside it fails parse_time() (e.g. a malformed "00:00:03.15.999" with a
+        stray extra segment). The except ValueError fallback used `line.strip()` -- the entire raw
+        line, broken timestamp included -- instead of the already-captured `m.group("text")`, so
+        the malformed timestamp string itself got burned into the caption as visible text."""
+        cues = OUT / "malformed_timestamp_cues.txt"
+        cues.write_text("00:00:00.15.999 --> 00:00:02 Hello there\n", encoding="utf-8")
+        srt_out = OUT / "malformed_timestamp.srt"
+        script("caption.py", "--text", cues, "--write-srt", srt_out)
+        from caption import parse_srt
+        parsed = parse_srt(str(srt_out))
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0][2], "Hello there", "the broken timestamp text must not leak into the caption")
+
     def test_drawtext_semicolon_and_quote_render_as_inert_literal_text(self):
         """escape_drawtext() (shared by overlay.py --text, graphics.py/overlay.py's --font
         fallback, and grid.py's filename-derived labels) had two more gaps beyond the comma/colon/
@@ -2239,6 +2316,29 @@ class FFmpegSkillTests(unittest.TestCase):
         data = json.loads(script("batch.py", folder, "--recipe", recipe2, "--fast", "--json").stdout)
         self.assertEqual(data["processed"], 1)
         self.assertClose(probe(data["results"][0]["output"])["duration"], 3.0, 0.3)
+
+    def test_batch_refuses_a_recipe_step_naming_a_script_outside_scripts_dir(self):
+        """run_step() built its command as `HERE / argv[0]`, where argv[0] came straight from an
+        untrusted recipe JSON step. Path's / operator silently ignores the left side when the
+        right side is itself an absolute path, and does nothing to stop a "../" traversal either
+        -- so a recipe (from a template, a shared config, anywhere the caller didn't author it
+        themselves) naming an absolute or ../-relative path got that file executed as a Python
+        script, with the caller's own privileges, once per matching media file. Verify both an
+        absolute path and a traversal path are refused instead of executed."""
+        folder = OUT / "batch_security"
+        folder.mkdir(exist_ok=True)
+        (folder / "a.mp4").write_bytes(Path(self.src).read_bytes())
+        evil = OUT / "batch_security_evil.py"
+        marker = OUT / "batch_security_pwned.txt"
+        marker.unlink(missing_ok=True)
+        evil.write_text(f"open({str(marker)!r}, 'w').write('pwned')\n", encoding="utf-8")
+
+        for step in ([str(evil)], ["../../../../tmp/does_not_matter.py"]):
+            recipe = folder / "batch.json"
+            recipe.write_text(json.dumps({"glob": "*.mp4", "steps": [step]}))
+            proc = script("batch.py", folder, "--recipe", recipe, "--fast", "--force", expect_fail=True)
+            self.assertIn("scripts/", proc.stderr)
+            self.assertFalse(marker.exists(), f"step {step} must not have executed")
 
     def test_batch_refuses_a_fixed_ext_recipe_that_collapses_two_sources_to_one_output(self):
         """final_path() falls back to each source's OWN extension by default, so files that only

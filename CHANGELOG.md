@@ -6,6 +6,52 @@
 
 (nothing yet)
 
+## 0.16.10 — fix batch.py arbitrary script execution, and four fit/background/caption/freeze correctness bugs
+
+- **Security:** `batch.py`'s recipe `steps` named the script to run for each
+  step as a plain, untrusted string from `batch.json` (`run_step()` built
+  `HERE / argv[0]`). `pathlib`'s `/` operator silently ignores the left side
+  when the right side is itself an absolute path, and does nothing to stop a
+  `../` traversal either -- so a `batch.json` the caller didn't author
+  themselves (a template, a shared config, anything from outside) could name
+  any Python file on disk (absolute path or `../` traversal) and have it
+  executed with the caller's own privileges, once per matching media file.
+  Confirmed with a live repro: a recipe step of `["/tmp/evil.py"]` executed
+  and wrote a file outside the project. Fixed by validating each step's
+  script name against the real, non-underscore-prefixed scripts in
+  `scripts/` before running it.
+- `fit.py` with only `--aspect` given (no `--width`/`--height`) bounded a
+  narrower/taller target by the source's *width* instead of its height --
+  a 1280x720 source asked for `--aspect 9:16` came out 1280x2276, a ~3.16x
+  unrequested upscale, in both `--fit pad` and `--fit crop`. Fixed by
+  bounding by whichever of the source's dimensions the new aspect actually
+  needs, so the output never exceeds the source's own resolution.
+- `background.py --gradient` used ffmpeg's `gradients` source filter without
+  pinning its `speed` option, which defaults to `0.01` -- a slow rotation
+  applied every frame. A "static" background (per this tool's own purpose:
+  a title card, a placeholder behind a logo) silently drifted frame to
+  frame instead of staying put, breaking the `bit_exact`/`deterministic`
+  contract `_contract.py` declares for this tool. Confirmed live: the same
+  pixel read a different value one second into a three-second clip. Fixed
+  by pinning `speed` near the filter's own enforced floor (`1e-05`; `0`
+  itself is refused) and `seed` to a fixed value.
+- `caption.py`'s cue parser could match a line's `-->`/text structure while
+  one of its two timestamps still failed to parse (e.g. a malformed
+  `00:00:03.15.999`); the fallback then used the *entire raw line*,
+  broken timestamp included, as the caption text instead of the text
+  already captured after the arrow. Fixed to fall back to just the parsed
+  text.
+- `freeze.py`'s mid-clip freeze rounds the video hold to a whole number of
+  frames (`n = round(hold * fps)`) but padded the audio by the raw,
+  unrounded `--hold` value -- up to half a frame off from what the video
+  actually holds for, a permanent A/V drift from that point on. Fixed by
+  padding audio by the same frame-rounded duration the video gets.
+- `cut.py` passed `--start`/`--end` straight to `parse_time()` with no sign
+  check, unlike `freeze.py`/`background.py`, which already refuse negative
+  durations -- a negative value reached ffmpeg's `-ss` as `-5.000000`
+  instead of being refused with a clear error naming the flag. Fixed by
+  refusing negative `--start`/`--end` up front.
+
 ## 0.16.9 — fix the MCP server crashing on a non-object JSON-RPC line
 
 `mcp/server.py`'s stdio loop parsed each line with `json.loads()`, which

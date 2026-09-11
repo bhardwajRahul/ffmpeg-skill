@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.0.0
+
+_Automated release: version and notes generated from pull requests merged since 0.16.15._
+
+- build(deps): bump actions/upload-artifact from 4 to 7 (#133)
+
 ## 0.16.15
 
 _Automated release: version and notes generated from pull requests merged since 0.16.14._

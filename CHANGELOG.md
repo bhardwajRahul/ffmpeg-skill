@@ -6,6 +6,17 @@
 
 (nothing yet)
 
+## 1.1.0
+
+_Automated release: version and notes generated from pull requests merged since 1.0.4._
+
+- Add a Claude Code plugin manifest so the repo installs with `claude plugin install` (#153)
+- chore(tests): cover verify.py's full plan and the MCP server's error paths (#152)
+- ci: run the test suite on Python 3.13 too (Ubuntu only) (#151)
+- build(deps): bump release-drafter/release-drafter from 6 to 7 (#132)
+- docs: state the 1.x stability guarantee and deprecation policy, pin the tool surface, verify each npm publish (#149)
+- ci(release): resolve the next version ourselves; a chore-only merge really releases nothing (#150)
+
 ## 1.0.4
 
 _Automated release: version and notes generated from pull requests merged since 1.0.3._

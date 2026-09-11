@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.0.1
+
+_Automated release: version and notes generated from pull requests merged since 1.0.0._
+
+- build(deps): bump actions/setup-node from 4 to 7 (#134)
+
 ## 1.0.0
 
 _Automated release: version and notes generated from pull requests merged since 0.16.15._

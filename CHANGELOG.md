@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 0.16.13
+
+_Automated release: version and notes generated from pull requests merged since 0.16.12._
+
+- Auto-bump the release version too, not just tag/release/npm publish (#129)
+
 ## 0.16.12 — verify the fully-automated release pipeline end to end
 
 No functional code changes. `.github/workflows/release.yml` was rewritten to

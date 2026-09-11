@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 0.16.15
+
+_Automated release: version and notes generated from pull requests merged since 0.16.14._
+
+- build(deps): bump actions/setup-python from 5 to 7 (#131)
+
 ## 0.16.14
 
 _Automated release: version and notes generated from pull requests merged since 0.16.13._

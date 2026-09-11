@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 0.16.14
+
+_Automated release: version and notes generated from pull requests merged since 0.16.13._
+
+- Add Dependabot, CodeQL, PR-labeling, CI concurrency, and more (#130)
+
 ## 0.16.13
 
 _Automated release: version and notes generated from pull requests merged since 0.16.12._

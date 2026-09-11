@@ -4,7 +4,7 @@
 
 ## Unreleased
 
-(nothing yet)
+- `color.py --correct` no longer desaturates bt709-tagged sources: the RGB stages are wrapped in explicit, matching YUV<->RGB conversions instead of libavfilter's auto-inserted pair, which used bt709 one way and bt601 the other (#159).
 
 ## 1.4.1
 

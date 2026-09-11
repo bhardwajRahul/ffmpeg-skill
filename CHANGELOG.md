@@ -4,7 +4,15 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.4.2
+
+_Automated release: version and notes generated from pull requests merged since 1.4.1._
+
 - `color.py --correct` no longer desaturates bt709-tagged sources: the RGB stages are wrapped in explicit, matching YUV<->RGB conversions instead of libavfilter's auto-inserted pair, which used bt709 one way and bt601 the other (#159).
+- docs(pitfalls): a literal skip-ci marker in a PR body silences the squash merge (#171)
+- fix(color): --correct no longer desaturates bt709-tagged sources (#167)
 
 ## 1.4.1
 

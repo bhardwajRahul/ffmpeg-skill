@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.0.4
+
+_Automated release: version and notes generated from pull requests merged since 1.0.3._
+
+- chore(release): never auto-bump the major, and stop releasing chore-only merges (#145)
+
 ## 1.0.3
 
 _Automated release: version and notes generated from pull requests merged since 1.0.2._

@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.0.2
+
+_Automated release: version and notes generated from pull requests merged since 1.0.1._
+
+- build(deps): bump dependabot/fetch-metadata from 2 to 3 (#135)
+
 ## 1.0.1
 
 _Automated release: version and notes generated from pull requests merged since 1.0.0._

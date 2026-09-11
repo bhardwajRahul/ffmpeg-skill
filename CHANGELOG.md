@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 1.4.0
+
+_Automated release: version and notes generated from pull requests merged since 1.3.1._
+
+- Add broll.py: cut away to a B-roll clip for a window and come back, A's timeline untouched (#158)
+
 ## 1.3.1
 
 _Automated release: version and notes generated from pull requests merged since 1.3.0._

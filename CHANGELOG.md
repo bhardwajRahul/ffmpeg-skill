@@ -4,7 +4,14 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.6.0
+
+_Automated release: version and notes generated from pull requests merged since 1.5.2._
+
 - `--plan FILE` on every tool: the dry run written as a plan (tool, argv, fingerprinted inputs, commands, expected output, verify steps) that `render.py FILE` executes later, refusing if an input changed since the plan was made and running the verify steps (probe, `check` for a platform) afterwards. "Plan → user confirms → execute" is one round trip (issue #189 C).
+- feat: --plan FILE writes the dry run as a plan that render.py executes (#196)
 
 ## 1.5.2
 

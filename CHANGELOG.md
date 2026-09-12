@@ -4,8 +4,15 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.4.11
+
+_Automated release: version and notes generated from pull requests merged since 1.4.10._
+
 - An output that names a directory, or whose directory does not exist, is refused as `kind: input` before ffmpeg runs (it was `OUTPUT_INVALID` after the run, or the muxer's ENOENT as `kind: ffmpeg`).
 - `batch.py` with a relative folder no longer doubles it in the default output directory (`bdir/bdir/out`).
+- fix: output-path mistakes are kind input before ffmpeg runs; batch default outdir no longer doubles a relative folder (#185)
 
 ## 1.4.10
 

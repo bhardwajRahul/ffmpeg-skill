@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.4.4
+
+_Automated release: version and notes generated from pull requests merged since 1.4.3._
+
 - `check.py`, `render.py` (check stage), `batch.py` and `verify.py` report a failed result as `status: failed` with the new `kind: verification` (`VERIFICATION_FAILED`, exit 1) and keep their detail fields (`checks`, `check`, `results`, `files`); before, they printed `status: completed` next to a non-zero exit code.
 - `scenes.py`, `cropdetect.py`, `sync.py`, `caption.py --transcribe` and the colour-level probe run their ffmpeg measurements under `--timeout` and report a decode failure as `kind: ffmpeg` instead of an empty result or a traceback; the transcribe temp directory is removed afterwards.
 - `render.py` and `batch.py` forward `--timeout` and `--overwrite` to every stage, not only `--fast`/`--dry-run`.
+- fix: failed check/render/batch/verify report status failed; analysis runs get --timeout; render/batch forward the shared flags (#174)
 
 ## 1.4.3
 

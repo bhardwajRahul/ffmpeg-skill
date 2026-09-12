@@ -199,8 +199,8 @@ class Context:
     it obvious what run()/emit() depend on and lets tests reset it with ``STATE.reset()``.
     """
 
-    __slots__ = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written")
-    _KEYS = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written")
+    __slots__ = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting")
+    _KEYS = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting")
 
     def __init__(self) -> None:
         self.reset()
@@ -215,6 +215,7 @@ class Context:
         self.timeout: float = _env_timeout()         # seconds per ffmpeg invocation, 0 = none
         self.overwrite = False                       # --overwrite: an existing output may be replaced
         self.written: set = set()                    # output paths this process has written itself
+        self.preexisting: dict = {}                  # output path -> (size, mtime_ns) of a file that was there before we ran
 
     # mapping-style access kept for backwards compatibility
     def __getitem__(self, key: str) -> Any:
@@ -300,8 +301,19 @@ def _cleanup_partial_output(cmd: Sequence[str]) -> None:
     if output in ("-", "pipe:0", "pipe:1") or output.startswith("pipe:") or output.startswith("-"):
         return
     try:
-        if os.path.exists(output):
-            os.remove(output)
+        if not os.path.exists(output):
+            return
+        # A file that was already there before this command ran is someone's deliverable, not
+        # our partial. If ffmpeg died before opening it (bad filter argument, unreadable input:
+        # the common case) it is byte-for-byte what it was, so leave it alone. Only when ffmpeg
+        # did open and truncate it (size or mtime changed) is what remains a partial of ours,
+        # and the original is already gone either way; then removing it is still right.
+        before = STATE.preexisting.get(os.path.realpath(output))
+        if before is not None:
+            st = os.stat(output)
+            if (st.st_size, st.st_mtime_ns) == before:
+                return
+        os.remove(output)
     except OSError:
         pass
 
@@ -348,7 +360,7 @@ def _check_existing_output(cmd: Sequence[str]) -> None:
     2.0 behaviour (refuse) today, and --overwrite is the explicit consent either way. Paths this
     process wrote itself (a two-pass tool, a copy-then-re-encode fallback) are never in question."""
     output = cmd[-1]
-    if STATE.overwrite or output in ("-",) or output.startswith("pipe:") or output.startswith("-"):
+    if output in ("-",) or output.startswith("pipe:") or output.startswith("-"):
         return
     try:
         exists = os.path.isfile(output)
@@ -356,6 +368,13 @@ def _check_existing_output(cmd: Sequence[str]) -> None:
     except OSError:
         return
     if not exists or real in STATE.written:
+        return
+    try:
+        st = os.stat(output)
+        STATE.preexisting[real] = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        pass
+    if STATE.overwrite:
         return
     if os.environ.get("FFMPEG_SKILL_NO_OVERWRITE", "") not in ("", "0"):
         die(f"refusing to overwrite existing output {output!r}: pass --overwrite to replace it, or choose another -o path", kind="input")
@@ -380,12 +399,40 @@ def _timed_out(cmd: Sequence[str], seconds: float) -> "None":
         code=124, kind="timeout")
 
 
+def _stage_existing_output(cmd: Sequence[str]) -> Tuple[List[str], Optional[str], Optional[str]]:
+    """When the output path already holds someone's file, run ffmpeg against a hidden sibling
+    temp path and move it over the original only on success.
+
+    ffmpeg's -y truncates the output the moment it opens it, and *when* it opens it depends on
+    the version: 6.1+ initialises the filter graph first (a bad LUT fails before the file is
+    touched), 5.x opens the output during option parsing, before any filter runs, so the same
+    bad LUT leaves a 0-byte file where the deliverable was. No amount of post-failure cleanup
+    can undo that; the only way to keep an existing file safe across a failed run is for ffmpeg
+    never to write to it. Same directory, same extension (the muxer is chosen by it), hidden
+    name, so nothing else changes for the encoder. Returns (command to execute, final path,
+    temp path); (cmd, None, None) when no staging is needed."""
+    output = cmd[-1]
+    if output == "-" or output.startswith("pipe:") or output.startswith("-"):
+        return list(cmd), None, None
+    try:
+        if not os.path.isfile(output) or os.path.realpath(output) in STATE.written:
+            return list(cmd), None, None
+    except OSError:
+        return list(cmd), None, None
+    d, base = os.path.split(output)
+    stem, ext = os.path.splitext(base)
+    tmp = os.path.join(d, f".{stem}.ffskill-{os.getpid()}{ext}")
+    return list(cmd[:-1]) + [tmp], output, tmp
+
+
 def run(cmd: Sequence[str], *, quiet: bool = False, check: bool = True) -> subprocess.CompletedProcess:
     """Run a command, echoing it to stderr unless quiet. Exits on failure when check=True.
 
     ffmpeg invocations are recorded in STATE.commands (for --json), skipped under --dry-run
     (a fake successful CompletedProcess is returned so scripts can keep planning), and run
-    with a progress readout under --progress. ffprobe and other tools always run.
+    with a progress readout under --progress. ffprobe and other tools always run. An output
+    path that already exists is written through a temp file and replaced only on success
+    (see _stage_existing_output), so a failed run never costs the caller the file that was there.
     """
     is_ffmpeg = _is_ffmpeg(cmd)
     if is_ffmpeg:
@@ -396,9 +443,22 @@ def run(cmd: Sequence[str], *, quiet: bool = False, check: bool = True) -> subpr
         info(("[dry-run] $ " if STATE.dry_run and is_ffmpeg else "$ ") + _cmdline(cmd))
     if STATE.dry_run and is_ffmpeg:
         return subprocess.CompletedProcess(list(cmd), 0, "", "")
-    if STATE.progress and is_ffmpeg and cmd[-1] != "-":
-        return _run_with_progress(list(cmd), check)
-    return _run_captured(list(cmd), check)
+    exec_cmd, final, tmp = _stage_existing_output(cmd) if is_ffmpeg else (list(cmd), None, None)
+    if STATE.progress and is_ffmpeg and exec_cmd[-1] != "-":
+        proc = _run_with_progress(exec_cmd, check)
+    else:
+        proc = _run_captured(exec_cmd, check)
+    if final and tmp:
+        if proc.returncode == 0:
+            try:
+                os.replace(tmp, final)
+            except OSError as e:
+                _cleanup_partial_output(exec_cmd)
+                die(f"could not replace {final} with the new output: {e}", kind="output")
+            _remember_output(cmd)
+        else:
+            _cleanup_partial_output(exec_cmd)
+    return proc
 
 
 def run_keeping_subtitles(cmd: List[str], output: str) -> bool:
@@ -455,22 +515,57 @@ def _progress_line(done: float, total: float, elapsed: float) -> str:
 
 
 def _run_with_progress(cmd: List[str], check: bool) -> subprocess.CompletedProcess:
-    """Run ffmpeg with -progress on a pipe and print percent/ETA to stderr."""
+    """Run ffmpeg with -progress on a pipe and print percent/ETA to stderr.
+
+    The time limit is checked on a clock, not per progress line: a deadlocked ffmpeg (the very
+    case --timeout exists for) prints nothing, so a loop that only looked at the deadline when a
+    line arrived waited on it forever. Reader threads drain both pipes; the main loop wakes at
+    least twice a second to compare the clock against the limit."""
+    import queue
+    import threading
     import time
     total = STATE.duration_hint or 0.0
     full = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
     t0 = time.time()
     limit = _limit_for(cmd)
     proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert proc.stdout is not None and proc.stderr is not None
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+    err_chunks: List[str] = []
+
+    def pump_out() -> None:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            lines.put(line)
+        lines.put(None)
+
+    def pump_err() -> None:
+        err_chunks.append(proc.stderr.read())  # type: ignore[union-attr]
+
+    threading.Thread(target=pump_out, daemon=True).start()
+    err_thread = threading.Thread(target=pump_err, daemon=True)
+    err_thread.start()
     last = ""
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        if limit and time.time() - t0 > limit:
-            proc.kill()
-            proc.communicate()
-            if last:
-                sys.stderr.write("\r" + " " * len(last) + "\r")
-            _timed_out(cmd, limit)
+
+    def clear_line() -> None:
+        if last:
+            sys.stderr.write("\r" + " " * len(last) + "\r")
+
+    def timed_out() -> None:
+        proc.kill()
+        proc.wait()
+        clear_line()
+        _timed_out(cmd, limit or 0)
+
+    while True:
+        remaining = (limit - (time.time() - t0)) if limit else None
+        if remaining is not None and remaining <= 0:
+            timed_out()
+        try:
+            line = lines.get(timeout=min(0.5, remaining) if remaining is not None else 0.5)
+        except queue.Empty:
+            continue
+        if line is None:
+            break
         if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
             try:
                 done = int(line.split("=")[1]) / 1_000_000
@@ -482,13 +577,12 @@ def _run_with_progress(cmd: List[str], check: bool) -> subprocess.CompletedProce
                 sys.stderr.flush()
                 last = msg
     try:
-        _, err = proc.communicate(timeout=(max(5.0, limit - (time.time() - t0)) if limit else None))
+        proc.wait(timeout=(max(5.0, limit - (time.time() - t0)) if limit else None))
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        _timed_out(cmd, limit or 0)
-    if last:
-        sys.stderr.write("\r" + " " * len(last) + "\r")
+        timed_out()
+    err_thread.join()
+    err = "".join(err_chunks)
+    clear_line()
     if proc.returncode == 0:
         _remember_output(cmd)
     if proc.returncode != 0:

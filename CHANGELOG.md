@@ -4,7 +4,14 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.4.13
+
+_Automated release: version and notes generated from pull requests merged since 1.4.12._
+
 - Fourth review, P3: `render.py` no longer re-encodes a clip whose `speed` is 1.0; a brand's `caption.animate` default is ignored over `--mode mux` instead of making it fail; `shell_quote` quotes newlines so the `commands` log stays copy-pasteable; `reverse.py` warns that a clip over 60 s is buffered whole in memory; `analyze_levels` scales 16-bit sources correctly (10 / 12 / 16-bit tiers); `sync.py`/`multicam.py --analyze-seconds` is capped at 900 s; the shared `--timeout`/`--overwrite` help is shorter, which trims every tool's MCP `inputSchema` (118 KB → 112 KB for `tools/list`); SKILL.md warns against burning captions at an intermediate size that `export.py` then upscales.
+- fix: fourth-review P3 batch -- render speed 1.0, brand animation over mux, newline-safe command log, reverse warning, 16-bit levels, analyze-seconds ceiling, shorter common help (#188)
 
 ## 1.4.12
 

@@ -4,8 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.4.3
+
+_Automated release: version and notes generated from pull requests merged since 1.4.2._
+
 - A failed ffmpeg run no longer costs the caller an output file that existed before the run. Such a file is now written through a hidden sibling temp file and replaced only on success; on failure the original is untouched and the temp removed. Previously the partial-output cleanup deleted it (any FFmpeg), and on FFmpeg 5.x ffmpeg itself truncated it to 0 bytes before a filter error, with or without `--overwrite`.
 - `--timeout` is enforced under `--progress`: the deadline is checked on a clock, so a deadlocked ffmpeg that prints no progress lines is killed and reported as `kind: timeout` instead of being waited on forever.
+- fix: a failed run never costs the caller an existing output; --timeout is enforced under --progress (#173)
+- ci(release): bump on the tip of main so a merge during the run cannot reject the push (#172)
 
 ## 1.4.2
 

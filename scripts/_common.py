@@ -176,6 +176,7 @@ def die(msg: str, code: int = 1, kind: str = "input", **extra: Any) -> "None":
     `status: "completed"` next to a non-zero exit code, so a caller keying on the status alone
     read a failed delivery as a success."""
     hint = extra.pop("hint", None)
+    STATE.plan = None  # a failed run plans nothing (the exit hook must not write a plan for it)
     sys.stderr.write(f"error: {msg}\n" + (f"hint: {hint}\n" if hint else ""))
     if STATE.json:
         doc: Dict[str, Any] = {
@@ -227,7 +228,7 @@ class Context:
     makes it obvious what run()/emit() depend on and lets tests reset it with ``STATE.reset()``.
     """
 
-    __slots__ = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting", "plan")
+    __slots__ = ("dry_run", "json", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting", "plan", "plan_written", "plan_inputs")
 
     def __init__(self) -> None:
         self.reset()
@@ -244,6 +245,8 @@ class Context:
         self.written: set = set()                    # output paths this process has written itself
         self.preexisting: dict = {}                  # output path -> (size, mtime_ns) of a file that was there before we ran
         self.plan: Optional[str] = None              # --plan FILE: write the dry-run as a plan document (implies --dry-run)
+        self.plan_written = False                    # write_plan() ran (emit or the exit hook), so the hook does not write twice
+        self.plan_inputs: List[str] = []             # side inputs (srt/ass/lut/font files) a tool named through escape_filter_path
 
 
 
@@ -269,6 +272,11 @@ def add_common(ap: "argparse.ArgumentParser") -> None:
 def apply_common(args: "argparse.Namespace") -> None:
     STATE.plan = getattr(args, "plan", None) or None
     STATE.dry_run = bool(getattr(args, "dry_run", False)) or bool(STATE.plan)
+    if STATE.plan:
+        # tools that print their document instead of calling emit() (probe, and the analysis
+        # tools without --json) still get their plan written, at exit, unless die() ran (review 6)
+        import atexit
+        atexit.register(_plan_at_exit)
     STATE.json = bool(getattr(args, "json", False))
     STATE.progress = bool(getattr(args, "progress", False))
     STATE.fast = bool(getattr(args, "fast", False))
@@ -351,9 +359,20 @@ def emit(output: Optional[str], **extra: Any) -> None:
         doc: Dict[str, Any] = {"status": "completed", "output": output, "dry_run": STATE.dry_run, "commands": list(STATE.commands)}
         if meta:
             doc["probe"] = meta
+        # What this tool itself verified about its artifact (issue #189 C, "verify as part of the
+        # contract"): the probe every writing tool runs, plus the measurements a tool adds
+        # (`verification` extra: loudness after the write, a platform check). `verified` is true
+        # only when the file was written, probed, and every self-check met its target; a dry run
+        # verified nothing. Spec failures the tool cannot fix on its own (export's loudness gap)
+        # keep status completed and say verified: false, so a caller keys on one field.
+        steps: List[Dict[str, Any]] = ([{"step": "probe", "ok": True}] if meta else []) + list(extra.pop("verification", None) or [])
+        if output and not STATE.dry_run and os.path.splitext(output)[1].lower() not in MEDIA_EXT:
+            steps.insert(0, {"step": "exists", "ok": True})
+        doc["verified"] = not STATE.dry_run and bool(steps) and all(s.get("ok") for s in steps)
+        doc["verification"] = steps
         doc.update(extra)
         if os.environ.get("FFMPEG_SKILL_RESULT_V2", "") not in ("", "0"):
-            doc["result_v2"] = _result_v2(output, meta, extra)
+            doc["result_v2"] = _result_v2(output, meta, dict(extra, verified=doc["verified"], verification=steps))
         if STATE.plan:
             doc["plan"] = write_plan(STATE.plan, output, extra)
         print_json(doc)
@@ -365,6 +384,14 @@ def emit(output: Optional[str], **extra: Any) -> None:
 
 PLAN_VERSION = 1
 _PLAN_STRIP = ("--plan", "--dry-run", "--json")
+
+
+def _plan_at_exit() -> None:
+    if STATE.plan and not STATE.plan_written:
+        try:
+            write_plan(STATE.plan, None, {})
+        except SystemExit:
+            pass
 
 
 def fingerprint(path: str) -> Dict[str, Any]:
@@ -385,10 +412,15 @@ def fingerprint(path: str) -> Dict[str, Any]:
     return {"path": os.path.abspath(path), "size": st.st_size, "sha256_head_tail": h.hexdigest()}
 
 
-def _plan_inputs(commands: Sequence[str]) -> List[str]:
-    """Every existing file named by `-i` in the planned commands (shell-quoted lines)."""
+def _plan_inputs(commands: Sequence[str], argv: Sequence[str] = ()) -> List[str]:
+    """Every existing file the plan depends on: the `-i` inputs of the planned commands, any
+    existing file named in argv (a recipe, a project, an SRT, a LUT, a still), and the side
+    inputs tools register through escape_filter_path() (review 6: only `-i` files were bound)."""
     import shlex
     seen: List[str] = []
+    for a in list(argv) + list(STATE.plan_inputs):
+        if a and not a.startswith("-") and os.path.isfile(a) and a not in seen:
+            seen.append(a)
     for line in commands:
         try:
             toks = shlex.split(line.split("] ", 1)[1] if line.startswith("[dry-run] ") else line)
@@ -432,7 +464,7 @@ def write_plan(path: str, output: Optional[str], extra: Dict[str, Any]) -> str:
         "tool": tool,
         "argv": cleaned,
         "cwd": os.getcwd(),
-        "inputs": [fingerprint(p) for p in _plan_inputs(STATE.commands)],
+        "inputs": [fingerprint(p) for p in _plan_inputs(STATE.commands, cleaned)],
         "commands": list(STATE.commands),
         "output": os.path.abspath(output) if output else None,
         "verify": verify,
@@ -446,11 +478,12 @@ def write_plan(path: str, output: Optional[str], extra: Dict[str, Any]) -> str:
         os.replace(tmp, path)
     except OSError as exc:
         die(f"cannot write plan {path}: {exc}", kind="output")
+    STATE.plan_written = True
     info(f"plan written: {path} ({len(doc['commands'])} command(s), {len(doc['inputs'])} input(s)); run it with render.py {path}")
     return path
 
 
-_V2_HANDLED = ("result", "measured", "notes", "dropped_non_av_streams")
+_V2_HANDLED = ("result", "measured", "notes", "dropped_non_av_streams", "verified", "verification")
 
 
 def _result_v2(output: Optional[str], meta: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -477,6 +510,8 @@ def _result_v2(output: Optional[str], meta: Dict[str, Any], extra: Dict[str, Any
         "metrics": metrics,
         "notes": list(notes) if isinstance(notes, (list, tuple)) else ([notes] if notes else []),
         "dropped": {"non_av_streams": bool(extra.get("dropped_non_av_streams", False))},
+        "verified": bool(extra.get("verified", False)),
+        "verification": list(extra.get("verification") or []),
         "details": {k: v for k, v in extra.items() if k not in _V2_HANDLED and k not in metrics},
     }
 
@@ -1439,6 +1474,8 @@ def escape_filter_path(path: str) -> str:
     filter as "Ryos Mac/cues.srt" (Unable to open ...). Three backslashes survive both passes
     (measured on 6.1 and 7.1 with subtitles=, ass= and lut3d=file=).
     """
+    if os.path.isfile(path) and path not in STATE.plan_inputs:
+        STATE.plan_inputs.append(path)  # a plan binds subtitle/LUT/font files too (review 6)
     p = str(Path(path))
     p = p.replace("\\", "/")
     p = p.replace(":", "\\\\:")

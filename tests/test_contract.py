@@ -1705,7 +1705,7 @@ class ContractTests(unittest.TestCase):
         env = dict(os.environ, FFMPEG_SKILL_RESULT_V2="1")
         doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.out("v2_cut.mp4"), "--json", env=env).stdout)
         v2 = doc["result_v2"]
-        self.assertEqual(sorted(v2), sorted(["schema", "output", "probe", "commands", "metrics", "notes", "dropped", "details"]))
+        self.assertEqual(sorted(v2), sorted(["schema", "output", "probe", "commands", "metrics", "notes", "dropped", "details", "verified", "verification"]))
         self.assertEqual((v2["schema"], v2["output"], v2["commands"]), (2, doc["output"], doc["commands"]))
         self.assertEqual(v2["probe"]["duration"], doc["probe"]["duration"])
         self.assertEqual(v2["metrics"]["expected_duration"], doc["expected_duration"])
@@ -1742,6 +1742,62 @@ class ContractTests(unittest.TestCase):
         self.assertIn("--start 0.000", doc["lossless_alternative"])
         doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "2", "--json", "-o", self.out("e6_cut0.mp4")).stdout)
         self.assertIsNone(doc["lossless_alternative"])
+
+    def test_verified_reports_what_the_tool_measured(self):
+        """#189 C: every success document carries `verified` and `verification`. cut: probe only;
+        loudness: probe + its own after-write measurement; export on a raw source: loudness step
+        not ok -> verified false while status stays completed; --dry-run verified nothing."""
+        doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.out("vf_cut.mp4"), "--json").stdout)
+        self.assertEqual((doc["verified"], doc["verification"]), (True, [{"step": "probe", "ok": True}]))
+        doc = json.loads(tool("loudness", self.src, "-o", self.out("vf_loud.mp4"), "--json").stdout)
+        self.assertTrue(doc["verified"]); self.assertEqual([s["step"] for s in doc["verification"]], ["probe", "loudness"])
+        self.assertEqual(doc["verification"][1]["target_lufs"], -14)
+        doc = json.loads(tool("export", self.src, "--preset", "x", "--fast", "-o", self.out("vf_x.mp4"), "--json").stdout)
+        self.assertEqual((doc["status"], doc["verified"]), ("completed", False))
+        self.assertEqual([(s["step"], s["ok"]) for s in doc["verification"]], [("probe", True), ("loudness", False)])
+        doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.out("vf_dry.mp4"), "--dry-run", "--json").stdout)
+        self.assertEqual((doc["verified"], doc["verification"]), (False, []))
+        doc = json.loads(tool("report", "--after", self.src, "-o", self.out("vf_rep.html"), "--json").stdout)
+        self.assertTrue(doc["verified"]); self.assertEqual(doc["verification"], [{"step": "exists", "ok": True}])
+        doc = json.loads(tool("look", self.src, "-o", self.out("vf_look.png"), "--json").stdout)
+        self.assertEqual((doc["verified"], doc["verification"]), (True, [{"step": "probe", "ok": True}]))
+        env = dict(os.environ, FFMPEG_SKILL_RESULT_V2="1")
+        doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.out("vf_v2.mp4"), "--json", env=env).stdout)
+        self.assertTrue(doc["result_v2"]["verified"]); self.assertNotIn("verified", doc["result_v2"]["details"])
+
+    def test_sixth_review_regressions(self):
+        """Review 6: loudness's verified reflects its target; --plan is written by tools that never
+        call emit(); verify refuses --plan; a plan binds argv/side files; a plan's failed platform
+        check is completed + verified false like the direct path; render refuses --plan; a
+        non-object plan JSON is kind input."""
+        import shutil
+        doc = json.loads(tool("loudness", self.wav, "-I", "-5", "--tp", "-3", "-o", self.out("r6_loud.wav"), "--json").stdout)
+        self.assertEqual((doc["status"], doc["verified"]), ("completed", False))
+        self.assertFalse(doc["verification"][1]["ok"])
+        plan = self.out("r6_probe.json")
+        self.assertEqual(tool("probe", self.src, "--plan", plan).returncode, 0)
+        self.assertEqual([i["path"] for i in json.loads(plan.read_text())["inputs"]], [str(self.src)])
+        proc = tool("verify", self.src, "--quick", "--out", self.out("r6_v"), "--plan", self.out("r6_verify.json"), "--json", check=False)
+        self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
+        self.assertFalse(self.out("r6_verify.json").exists())
+        srt = self.out("r6.srt"); srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n", encoding="utf-8")
+        plan = self.out("r6_cap.json")
+        tool("caption", self.src, "--srt", srt, "-o", self.out("r6_cap.mp4"), "--plan", plan)
+        self.assertIn(str(srt), [i["path"] for i in json.loads(plan.read_text())["inputs"]])
+        srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nchanged\n", encoding="utf-8")
+        proc = tool("render", plan, "--json", check=False)
+        self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
+        xplan = self.out("r6_x.json")
+        tool("export", self.src, "--preset", "x", "--fast", "-o", self.out("r6_x.mp4"), "--plan", xplan)
+        doc = json.loads(tool("render", xplan, "--json").stdout)
+        self.assertEqual((doc["status"], doc["verified"]), ("completed", False))
+        self.assertIn({"step": "check", "ok": False, "platform": "x"}, doc["verification"])
+        proj = self.out("r6_proj.json"); proj.write_text(json.dumps({"output": str(self.out("r6_r.mp4")), "clips": [{"src": str(self.src)}]}))
+        proc = tool("render", proj, "--plan", self.out("r6_rplan.json"), "--json", check=False)
+        self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
+        bad = self.out("r6_bad.json"); bad.write_text("[1, 2]")
+        proc = tool("render", bad, "--json", check=False)
+        self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
 
     def test_plan_roundtrip(self):
         """--plan writes a plan and runs nothing; render.py executes it, verifies, and refuses when

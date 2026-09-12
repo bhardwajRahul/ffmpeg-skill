@@ -4,8 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 1.5.0
+
+_Automated release: version and notes generated from pull requests merged since 1.4.15._
+
 - `FFMPEG_SKILL_RESULT_V2=1` adds a `result_v2` key to every writing tool's `--json` success document: the uniform shape planned for 2.0 (`output`, `probe`, `commands`, `metrics`, `notes`, `dropped`, `details`), built in `emit()` from the keys tools already report (#189). Nothing moves without it.
 (nothing yet)
+- feat: opt-in result_v2 key previews the 2.0 success-document shape (#193)
+- docs: record eval iteration 6 (1.4.15) (#192)
 
 ## 1.4.15
 
